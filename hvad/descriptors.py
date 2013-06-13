@@ -41,14 +41,35 @@ class TranslatedAttribute(BaseDescriptor):
             if django.VERSION >= (1, 7) and not registry.apps.ready: #pragma: no cover
                 raise AttributeError('Attribute not available until registry is ready.')
             # Don't raise an attribute error so we can use it in admin.
+            return self.opts.translations_model._meta.get_field_by_name(
+                                                    self.name)[0].default
+
+#        return getattr(self.translation(instance), self.name)
+        from django.core import exceptions
+        try:
+            return getattr(self.translation(instance), self.name)
+        except exceptions.ObjectDoesNotExist:
+            from django.utils.translation import get_language
+            opts = instance._meta
+            language_code = get_language()
+            accessor = getattr(instance, opts.translations_accessor)
             try:
-                if django.VERSION >= (1, 8):
-                    return self.opts.translations_model._meta.get_field(self.name).default
+                translation = accessor.get(language_code=language_code)
+            except exceptions.ObjectDoesNotExist:
+                if accessor.all().count() > 0:
+                    translation = accessor.all()[0]
                 else:
-                    return self.opts.translations_model._meta.get_field_by_name(self.name)[0].default
-            except FieldDoesNotExist as e: #pragma: no cover (django 1.6 before models loaded)
-                raise AttributeError(*e.args)
-        return getattr(self.translation(instance), self.name)
+                    translation = self.translation(instance)
+            return getattr(translation, self.name)
+#            try:
+#                if django.VERSION >= (1, 8):
+#                    return self.opts.translations_model._meta.get_field(self.name).default
+#                else:
+#                    return self.opts.translations_model._meta.get_field_by_name(self.name)[0].default
+#            except FieldDoesNotExist as e: #pragma: no cover (django 1.6 before models loaded)
+#                raise AttributeError(*e.args)
+#        return getattr(self.translation(instance), self.name)
+## To here
     
     def __set__(self, instance, value):
         setattr(self.translation(instance), self.name, value)
