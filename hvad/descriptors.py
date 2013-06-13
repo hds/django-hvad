@@ -32,7 +32,24 @@ class TranslatedAttribute(BaseDescriptor):
             # Don't raise an attribute error so we can use it in admin.
             return self.opts.translations_model._meta.get_field_by_name(
                                                     self.name)[0].default
-        return getattr(self.translation(instance), self.name)
+        
+#        return getattr(self.translation(instance), self.name)
+        from django.core import exceptions
+        try:
+            return getattr(self.translation(instance), self.name)
+        except exceptions.ObjectDoesNotExist:
+            from django.utils.translation import get_language
+            opts = instance._meta
+            language_code = get_language()
+            accessor = getattr(instance, opts.translations_accessor)
+            try:
+                translation = accessor.get(language_code=language_code)
+            except exceptions.ObjectDoesNotExist:
+                if accessor.all().count() > 0:
+                    translation = accessor.all()[0]
+                else:
+                    translation = self.translation(instance)
+            return getattr(translation, self.name)
     
     def __set__(self, instance, value):
         setattr(self.translation(instance), self.name, value)
