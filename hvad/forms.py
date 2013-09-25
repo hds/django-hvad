@@ -360,7 +360,6 @@ class TranslatableModelAllTranslationsForm(with_metaclass(TranslatableModelAllTr
         else:
             fail_message = 'changed'
             new = False
-        print self.cleaned_data
         super(TranslatableModelAllTranslationsForm, self).save(True)
         trans_model = self.instance._meta.translations_model
         language_code = self.cleaned_data.get('language_code', get_language())
