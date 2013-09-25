@@ -1,3 +1,5 @@
+import copy
+
 from django.core.exceptions import FieldError
 from django.forms.forms import get_declared_fields
 from django.forms.formsets import formset_factory
@@ -6,6 +8,7 @@ from django.forms.models import (ModelForm, ModelFormMetaclass, ModelFormOptions
 from django.forms.util import ErrorList
 from django.forms.widgets import media_property
 from django.utils.translation import get_language
+from django.conf import settings
 from hvad.compat.metaclasses import with_metaclass
 from hvad.models import TranslatableModel
 from hvad.utils import get_cached_translation, get_translation, combine, \
@@ -193,8 +196,6 @@ class TranslatableModelForm(with_metaclass(TranslatableModelFormMetaclass, Model
 ## -------- Lots of hacking going on here --------
 ##
 
-from django.conf import settings
-
 class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
     def __new__(cls, name, bases, attrs):
         
@@ -276,7 +277,7 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
             
             # Add all translated fields.
             atfields = { }
-            for lang_code in get_all_language_codes():
+            for lang_code, language in settings.LANGUAGES:
                 tfields = fields_for_model(mopts.translations_model,
                                            tfieldnames, texclude, opts.widgets,
                                            formfield_callback)
@@ -286,7 +287,10 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
                 # overwritten below.
                 for key in tfields.keys():
                     if key in declared_fields:
-                        tfields[key] = declared_fields[key]
+                        tfields[key] = copy.deepcopy(declared_fields[key])
+                        tfields[key].label = tfields[key].label % {
+                                'language': language,
+                                'lang_code': lang_code, }
                 atfields.update(dict_language_keys(tfields, lang_code))
             
             fields = sfields
