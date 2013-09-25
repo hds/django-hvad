@@ -281,6 +281,12 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
                                            tfieldnames, texclude, opts.widgets,
                                            formfield_callback)
 
+                # Override translated default model fields with custom
+                # declared ones. Untranslated and additional fields are
+                # overwritten below.
+                for key in tfields.keys():
+                    if key in declared_fields:
+                        tfields[key] = declared_fields[key]
                 atfields.update(dict_language_keys(tfields, lang_code))
             
             fields = sfields
@@ -295,9 +301,11 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
                 message = message % (', '.join(missing_fields),
                                      opts.model.__name__)
                 raise FieldError(message)
-            # Override default model fields with any custom declared ones
-            # (plus, include all the other declared fields).
-            fields.update(declared_fields)
+            # Override untranslated default model fields with any custom
+            # declared ones (plus, include all the other declared fields).
+            # the translated fields are overwritten above.
+            for key in [k for k in declared_fields.keys() if k not in tfieldnames]:
+                fields[key] = declared_fields[key]
             
             if new_class._meta.exclude:
                 new_class._meta.exclude = list(new_class._meta.exclude)
