@@ -8,7 +8,10 @@ from django.forms.widgets import media_property
 from django.utils.translation import get_language
 from hvad.compat.metaclasses import with_metaclass
 from hvad.models import TranslatableModel
-from hvad.utils import get_cached_translation, get_translation, combine
+from hvad.utils import get_cached_translation, get_translation, combine, \
+                       dict_language_keys, get_all_language_codes, \
+                       get_field_for_language_field, \
+                       get_language_field_for_field
 
 
 class TranslatableModelFormMetaclass(ModelFormMetaclass):
@@ -186,7 +189,220 @@ class TranslatableModelForm(with_metaclass(TranslatableModelFormMetaclass, Model
                 self.instance = self.instance.translate(language_code)
         return super(TranslatableModelForm, self)._post_clean()
 
+##
+## -------- Lots of hacking going on here --------
+##
 
+from django.conf import settings
+
+class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
+    def __new__(cls, name, bases, attrs):
+        
+        """
+        Django 1.3 fix, that removes all Meta.fields and Meta.exclude
+        fieldnames that are in the translatable model. This ensures
+        that the superclass' init method doesnt throw a validation
+        error
+        """
+        fields = []
+        exclude = []
+        fieldsets = []
+        if "Meta" in attrs:
+            meta = attrs["Meta"]
+            if getattr(meta, "fieldsets", False):
+                fieldsets = meta.fieldsets
+                meta.fieldsets = []
+            if getattr(meta, "fields", False):
+                fields = meta.fields
+                meta.fields = []
+            if getattr(meta, "exclude", False):
+                exclude = meta.exclude
+                meta.exclude = []
+        # End 1.3 fix
+        
+        super_new = super(TranslatableModelAllTranslationsFormMetaclass, cls).__new__
+        
+        formfield_callback = attrs.pop('formfield_callback', None)
+        declared_fields = get_declared_fields(bases, attrs, False)
+        new_class = super_new(cls, name, bases, attrs)
+        
+        # Start 1.3 fix
+        if fields:
+            new_class.Meta.fields = fields
+        if exclude:
+            new_class.Meta.exclude = exclude
+        if fieldsets:
+            new_class.Meta.fieldsets = fieldsets
+        # End 1.3 fix
+
+        if not getattr(new_class, "Meta", None):
+            class Meta:
+                exclude = ['language_code']
+            new_class.Meta = Meta
+        elif not getattr(new_class.Meta, 'exclude', None):
+            new_class.Meta.exclude = ['language_code']
+        elif getattr(new_class.Meta, 'exclude', False):
+            if 'language_code' not in new_class.Meta.exclude:
+                new_class.Meta.exclude.append("language_code")
+
+        if 'Media' not in attrs:
+            new_class.media = media_property(new_class)
+        opts = new_class._meta = ModelFormOptions(getattr(new_class, 'Meta', attrs.get('Meta', None)))
+        if opts.model:
+            # bail out if a wrong model uses this form class
+            if not issubclass(opts.model, TranslatableModel):
+                raise TypeError(
+                    "Only TranslatableModel subclasses may use TranslatableModelForm"
+                )
+            mopts = opts.model._meta
+            
+            shared_fields = mopts.get_all_field_names()
+            
+            # split exclude and include fieldnames into shared and translated
+            sfieldnames = [field for field in opts.fields or [] if field in shared_fields]
+            tfieldnames = [field for field in opts.fields or [] if field not in shared_fields]
+            sexclude = [field for field in opts.exclude or [] if field in shared_fields]
+            texclude = [field for field in opts.exclude or [] if field not in shared_fields]
+            
+            # required by fields_for_model
+            if not sfieldnames :
+                sfieldnames = None if not fields else []
+            if not tfieldnames:
+                tfieldnames = None if not fields else []
+            
+            # If a model is defined, extract form fields from it.
+            sfields = fields_for_model(opts.model, sfieldnames, sexclude,
+                                       opts.widgets, formfield_callback)
+            
+            # Add all translated fields.
+            atfields = { }
+            for lang_code in get_all_language_codes():
+                tfields = fields_for_model(mopts.translations_model,
+                                           tfieldnames, texclude, opts.widgets,
+                                           formfield_callback)
+
+                atfields.update(dict_language_keys(tfields, lang_code))
+            
+            fields = sfields
+            fields.update(atfields)
+            
+            # make sure opts.fields doesn't specify an invalid field
+            none_model_fields = [k for k, v in fields.items() if not v]
+            missing_fields = set(none_model_fields) - \
+                             set(declared_fields.keys())
+            if missing_fields:
+                message = 'Unknown field(s) (%s) specified for %s'
+                message = message % (', '.join(missing_fields),
+                                     opts.model.__name__)
+                raise FieldError(message)
+            # Override default model fields with any custom declared ones
+            # (plus, include all the other declared fields).
+            fields.update(declared_fields)
+            
+            if new_class._meta.exclude:
+                new_class._meta.exclude = list(new_class._meta.exclude)
+            else:
+                new_class._meta.exclude = []
+                
+            for field in (mopts.translations_accessor, 'master'):
+                if not field in new_class._meta.exclude:
+                    new_class._meta.exclude.append(field)
+        else:
+            fields = declared_fields
+        new_class.declared_fields = declared_fields
+        new_class.base_fields = fields
+        # always exclude the FKs
+        return new_class
+
+
+class TranslatableModelAllTranslationsForm(with_metaclass(TranslatableModelAllTranslationsFormMetaclass, ModelForm)):
+    def __init__(self, data=None, files=None, auto_id='id_%s', prefix=None,
+                 initial=None, error_class=ErrorList, label_suffix=':',
+                 empty_permitted=False, instance=None):
+        opts = self._meta
+        model_opts = opts.model._meta
+        object_data = {}
+        language = getattr(self, 'language', get_language())
+        if instance is not None:
+            all_trans = { }
+            trans = get_cached_translation(instance)
+            all_trans[language] = trans
+            # Set all translations for each translated field.
+            for lang_code in get_all_language_codes():
+                if all_trans.get(lang_code, None) is None:
+                    try:
+                        all_trans[lang_code] = get_translation(instance, lang_code)
+                    except model_opts.translations_model.DoesNotExist:
+                        all_trans[lang_code] = None
+                if all_trans[lang_code]:
+                    trans_data = model_to_dict(all_trans[lang_code], opts.fields, opts.exclude)
+                    object_data.update(dict_language_keys(trans_data, lang_code))
+
+        if initial is not None:
+            object_data.update(initial)
+        initial = object_data
+        super(TranslatableModelAllTranslationsForm, self).\
+                __init__(data, files, auto_id, prefix, object_data,
+                         error_class, label_suffix, empty_permitted, instance)
+
+    def save(self, commit=True):
+        if self.instance.pk is None:
+            fail_message = 'created'
+            new = True
+        else:
+            fail_message = 'changed'
+            new = False
+        print self.cleaned_data
+        super(TranslatableModelAllTranslationsForm, self).save(True)
+        trans_model = self.instance._meta.translations_model
+        language_code = self.cleaned_data.get('language_code', get_language())
+        all_trans = { }
+        # Save all translations for each translated field.
+        for lang_code in get_all_language_codes():
+            if not new:
+                trans = get_cached_translation(self.instance)
+                all_trans[trans.language_code] = trans
+                if all_trans.get(lang_code, None) is None:
+                    try:
+                        all_trans[lang_code] = get_translation(self.instance,
+                                                               lang_code)
+                    except trans_model.DoesNotExist:
+                        all_trans[lang_code] = trans_model()
+            else:
+                all_trans[lang_code] = trans_model()
+
+            all_trans[lang_code].language_code = lang_code
+            all_trans[lang_code].master = self.instance
+            base_keys = [ ]
+            for key in self.cleaned_data.keys():
+                base_key = get_field_for_language_field(key, lang_code)
+                if base_key != key:
+                    self.cleaned_data[base_key] = self.cleaned_data[key]
+                    base_keys.append(base_key)
+            all_trans[lang_code] = save_instance(self, all_trans[lang_code],
+                                                 self._meta.fields,
+                                                 fail_message, commit,
+                                                 construct=True)
+            # Clean up cleaned data.
+            for base_key in base_keys:
+                del self.cleaned_data[base_key]
+
+        return combine(all_trans[language_code], self.Meta.model)
+        
+    def _post_clean(self):
+        if self.instance.pk:
+            try:
+                trans = trans = get_translation(self.instance, self.instance.language_code)
+                trans.master = self.instance
+                self.instance = combine(trans, self.Meta.model)
+            except self.instance._meta.translations_model.DoesNotExist:
+                language_code = self.cleaned_data.get('language_code', get_language())
+                self.instance = self.instance.translate(language_code)
+        return super(TranslatableModelAllTranslationsForm, self)._post_clean()
+
+##
+## -------- All the hacking finished --------
+##
 
 class CleanMixin(object):
     def clean(self):

@@ -1,6 +1,9 @@
 from django.db.models.fields import FieldDoesNotExist
 from django.utils.translation import get_language
+from django.conf import settings
 from hvad.exceptions import WrongManager
+
+TRANSLATION_FIELD_EXTRA = '__translation__{0}'
 
 def combine(trans, klass):
     """
@@ -26,6 +29,24 @@ def get_translation(instance, language_code=None):
         language_code = get_language()
     accessor = getattr(instance, opts.translations_accessor)
     return accessor.get(language_code=language_code)
+
+def dict_language_keys(d, language_code):
+    new_d = { }
+    for key in d.keys():
+        new_d[get_language_field_for_field(key, language_code)] = d[key]
+    return new_d
+
+def get_all_language_codes():
+    return [code for code, lang in settings.LANGUAGES]
+
+def get_field_for_language_field(name, language_code):
+    if name.endswith(TRANSLATION_FIELD_EXTRA.format(language_code)):
+        name = name[:-len(TRANSLATION_FIELD_EXTRA.format(language_code))]
+    return name
+
+def get_language_field_for_field(name, language_code):
+    return name + TRANSLATION_FIELD_EXTRA.format(language_code)
+
 
 def get_translation_aware_manager(model):
     from nani.manager import TranslationAwareManager
