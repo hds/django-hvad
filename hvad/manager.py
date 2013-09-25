@@ -1,8 +1,12 @@
 from collections import defaultdict
+import django
 from django.conf import settings
 from django.db import models, transaction, IntegrityError
-from django.db.models.query import (QuerySet, ValuesQuerySet, DateQuerySet, 
-    CHUNK_SIZE)
+from django.db.models.query import QuerySet, ValuesQuerySet, DateQuerySet
+try:
+    from django.db.models.query import CHUNK_SIZE
+except ImportError:
+    CHUNK_SIZE = 100
 from django.db.models.query_utils import Q
 from django.utils.translation import get_language
 from hvad.fieldtranslator import translate
@@ -12,6 +16,7 @@ import logging
 import sys
 
 logger = logging.getLogger(__name__)
+DJANGO_VERSION = django.get_version()
 
 # maybe there should be an extra settings for this
 FALLBACK_LANGUAGES = [ code for code, name in settings.LANGUAGES ]
@@ -227,6 +232,21 @@ class TranslationQueryset(QuerySet):
         accessor = self.shared_model._meta.translations_accessor
         # update using the real manager
         return self._real_manager.filter(**{'%s__in' % accessor:qs})
+
+    def _scan_for_language_where_node(self, children):
+        found = False
+        for node in children:
+            try:
+                field_name = node[0].field.name
+            except TypeError:
+                if node.children:
+                    found = self._scan_for_language_where_node(node.children)
+            else:
+                found = field_name == 'language_code'
+
+            if found:
+                # No need to continue
+                return True
     
     #===========================================================================
     # Queryset/Manager API 
@@ -288,14 +308,7 @@ class TranslationQueryset(QuerySet):
                 qs = self.language(language_code)
                 found = True
         else:
-            for where in qs.query.where.children:
-                if where.children:
-                    for child in where.children:
-                        if child[0].field.name == 'language_code':
-                            found = True
-                            break
-                if found:
-                    break
+            found = self._scan_for_language_where_node(qs.query.where.children)
         if not found:
             qs = self.language()
         # self.iterator already combines! Isn't that nice?
@@ -440,8 +453,13 @@ class TranslationQueryset(QuerySet):
                 related_model_keys.append(query_key)  # Select the related model
                 related_model_keys.append('%s__%s' % (query_key, model._meta.translations_accessor))  # and its translation model
 
-                # We need to force this to be a LEFT OUTER join, so we explicitly add the join:
-                related_model_explicit_joins.append((field.model._meta.db_table, model._meta.db_table, bits[0] + "_id", 'id'))
+                # We need to force this to be a LEFT OUTER join, so we explicitly add the join.
+                # Django 1.6 changes the footprint of the Query.join method. See https://code.djangoproject.com/ticket/19385
+                if DJANGO_VERSION < '1.6':
+                    join_data = (field.model._meta.db_table, model._meta.db_table, bits[0] + "_id", 'id')
+                else:
+                    join_data = (field, (field.model._meta.db_table, model._meta.db_table, ((bits[0] + "_id", 'id'),)))
+                related_model_explicit_joins.append(join_data)
                 # And we are going to force the query to treat the language join as one-to-one,
                 # so we need to filter for the desired language:
                 related_model_extra_filters.append(('%s__%s__language_code' % (query_key, model._meta.translations_accessor), self._language_code))
@@ -457,7 +475,12 @@ class TranslationQueryset(QuerySet):
         obj = self._clone()
         obj.query.get_compiler(obj.db).fill_related_selections()  # seems to be necessary; not sure why
         for j in related_model_explicit_joins:
-            obj.query.join(j, outer_if_first=True)
+            if DJANGO_VERSION >= '1.6':
+                kwargs = {'join_field': j[0]}
+                j = j[1]
+            else:
+                kwargs = {}
+            obj.query.join(j, outer_if_first=True, **kwargs)
         for f in related_model_extra_filters:
             f1 = {f[0]: f[1]}
             f2 = {f[0]: None}  # Allow select_related() to fetch objects with a relation set to NULL
@@ -582,10 +605,12 @@ class TranslationManager(models.Manager):
     # API 
     #===========================================================================
 
+    queryset_class = TranslationQueryset
+
     def using_translations(self):
         if not hasattr(self, '_real_manager'):
             self.contribute_real_manager()
-        qs = TranslationQueryset(self.translations_model, using=self.db, real=self._real_manager)
+        qs = self.queryset_class(self.translations_model, using=self.db, real=self._real_manager)
         if hasattr(self, 'core_filters'):
             qs = qs._next_is_sticky().filter(**(self.core_filters))
         return qs
