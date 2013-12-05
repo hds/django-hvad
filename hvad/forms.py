@@ -318,8 +318,6 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
             for key in [k for k in declared_fields.keys() if k not in tfieldnames]:
                 fields[key] = declared_fields[key]
             
-#            print 'fields:', fields
-#            print 'shared_fields:', opts.fields
             from django.utils.datastructures import SortedDict
             ofields = SortedDict()
             for key in opts.fields:
@@ -414,6 +412,7 @@ class TranslatableModelAllTranslationsForm(with_metaclass(TranslatableModelAllTr
                                                  self._meta.fields,
                                                  fail_message, commit,
                                                  construct=True)
+
             # Clean up cleaned data.
             for base_key in base_keys:
                 del self.cleaned_data[base_key]
