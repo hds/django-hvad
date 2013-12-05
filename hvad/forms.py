@@ -288,9 +288,16 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
                 for key in tfields.keys():
                     if key in declared_fields:
                         tfields[key] = copy.deepcopy(declared_fields[key])
-                        tfields[key].label = tfields[key].label % {
-                                'language': language,
-                                'lang_code': lang_code, }
+                    
+                    tfields[key].label = tfields[key].label % {
+                            'language': language,
+                            'lang_code': lang_code, }
+                    if 'class' in tfields[key].widget.attrs:
+                        tfields[key].widget.attrs['class'] += ' '
+                    else:
+                        tfields[key].widget.attrs['class'] = ''
+                    tfields[key].widget.attrs['class'] += 'translation__' + lang_code
+
                 atfields.update(dict_language_keys(tfields, lang_code))
             
             fields = sfields
@@ -311,6 +318,19 @@ class TranslatableModelAllTranslationsFormMetaclass(ModelFormMetaclass):
             for key in [k for k in declared_fields.keys() if k not in tfieldnames]:
                 fields[key] = declared_fields[key]
             
+#            print 'fields:', fields
+#            print 'shared_fields:', opts.fields
+            from django.utils.datastructures import SortedDict
+            ofields = SortedDict()
+            for key in opts.fields:
+                if key in fields:
+                    ofields[key] = fields[key]
+                else:
+                    for lang_code, language in settings.LANGUAGES:
+                        lkey = get_language_field_for_field(key, lang_code)
+                        ofields[lkey] = fields[lkey]
+            fields = ofields
+
             if new_class._meta.exclude:
                 new_class._meta.exclude = list(new_class._meta.exclude)
             else:
