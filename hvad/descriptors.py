@@ -1,6 +1,9 @@
-from hvad.utils import get_translation
-
-class NULL:pass
+import django
+from django.db.models.fields import FieldDoesNotExist
+from django.utils.translation import get_language
+from hvad.utils import get_translation, set_cached_translation, get_cached_translation
+if django.VERSION >= (1, 7):
+    from django.apps import registry
 
 class BaseDescriptor(object):
     """
@@ -8,48 +11,65 @@ class BaseDescriptor(object):
     """
     def __init__(self, opts):
         self.opts = opts
+        self._NoTranslationError = type('NoTranslationError',
+                                        (AttributeError, opts.translations_model.DoesNotExist),
+                                        {})
     
     def translation(self, instance):
-        cached = getattr(instance, self.opts.translations_cache, None)
-        if not cached:
-            cached = get_translation(instance)
-            setattr(instance, self.opts.translations_cache, cached)
-        return cached
+        translation = get_cached_translation(instance)
+        if translation is None:
+            try:
+                translation = get_translation(instance)
+            except self.opts.translations_model.DoesNotExist:
+                raise self._NoTranslationError('Accessing a translated field requires that '
+                                               'the instance has a translation loaded, or a '
+                                               'valid translation in current language (%s) '
+                                               'loadable from the database' % get_language())
+            set_cached_translation(instance, translation)
+        return translation
 
 
 class TranslatedAttribute(BaseDescriptor):
-    """
-    Basic translated attribute descriptor.
-    
-    Proxies attributes from the shared instance to the translated instance.
-    """
+    """ Proxies attributes from the shared instance to the translated instance. """
+
     def __init__(self, opts, name):
         self.name = name
         super(TranslatedAttribute, self).__init__(opts)
-        
+
     def __get__(self, instance, instance_type=None):
         if not instance:
+            if django.VERSION >= (1, 7) and not registry.apps.ready:
+                raise AttributeError('Attribute not available until registry is ready.')
             # Don't raise an attribute error so we can use it in admin.
-            return self.opts.translations_model._meta.get_field_by_name(
-                                                    self.name)[0].default
-        
-#        return getattr(self.translation(instance), self.name)
-        from django.core import exceptions
-        try:
-            return getattr(self.translation(instance), self.name)
-        except exceptions.ObjectDoesNotExist:
-            from django.utils.translation import get_language
-            opts = instance._meta
-            language_code = get_language()
-            accessor = getattr(instance, opts.translations_accessor)
+##            return self.opts.translations_model._meta.get_field_by_name(
+##                                                    self.name)[0].default
+##        
+###        return getattr(self.translation(instance), self.name)
+##        from django.core import exceptions
+##        try:
+##            return getattr(self.translation(instance), self.name)
+##        except exceptions.ObjectDoesNotExist:
+##            from django.utils.translation import get_language
+##            opts = instance._meta
+##            language_code = get_language()
+##            accessor = getattr(instance, opts.translations_accessor)
+##            try:
+##                translation = accessor.get(language_code=language_code)
+##            except exceptions.ObjectDoesNotExist:
+##                if accessor.all().count() > 0:
+##                    translation = accessor.all()[0]
+##                else:
+##                    translation = self.translation(instance)
+##            return getattr(translation, self.name)
             try:
-                translation = accessor.get(language_code=language_code)
-            except exceptions.ObjectDoesNotExist:
-                if accessor.all().count() > 0:
-                    translation = accessor.all()[0]
+                if django.VERSION >= (1, 8):
+                    return self.opts.translations_model._meta.get_field(self.name).default
                 else:
-                    translation = self.translation(instance)
-            return getattr(translation, self.name)
+                    return self.opts.translations_model._meta.get_field_by_name(self.name)[0].default
+            except FieldDoesNotExist as e:
+                raise AttributeError(*e.args)
+        return getattr(self.translation(instance), self.name)
+## To here
     
     def __set__(self, instance, value):
         setattr(self.translation(instance), self.name, value)
@@ -68,8 +88,8 @@ class LanguageCodeAttribute(TranslatedAttribute):
         super(LanguageCodeAttribute, self).__init__(opts, 'language_code')
     
     def __set__(self, instance, value):
-        raise AttributeError("The 'language_code' attribute cannot be " +\
-                    "changed directly! Use the translate() method instead.")
+        raise AttributeError("The 'language_code' attribute cannot be "
+                             "changed directly! Use the translate() method instead.")
     
     def __delete__(self, instance):
         raise AttributeError("The 'language_code' attribute cannot be deleted!")
